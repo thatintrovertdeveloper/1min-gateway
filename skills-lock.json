@@ -1,0 +1,26 @@
+{
+  "version": 2,
+  "skills": {
+    "security-testing": {
+      "source": "petrkindlmann/qa-skills",
+      "commit": "5087a3461d49da76b1e794d9b0bfbd23f38dc75b",
+      "sourceType": "github",
+      "skillPath": "skills/security-testing/SKILL.md",
+      "computedHash": "64a9f80dfafbbd33dd8f7d2095f03d7a5b7305fecad606d9c5f7df10fbeba595"
+    },
+    "synthetic-monitoring": {
+      "source": "petrkindlmann/qa-skills",
+      "commit": "5087a3461d49da76b1e794d9b0bfbd23f38dc75b",
+      "sourceType": "github",
+      "skillPath": "skills/synthetic-monitoring/SKILL.md",
+      "computedHash": "c91d873ba1bda62bb4c861185c30167eef14af307bc9eb6ca401092423be8d4e"
+    },
+    "test-strategy": {
+      "source": "petrkindlmann/qa-skills",
+      "commit": "5087a3461d49da76b1e794d9b0bfbd23f38dc75b",
+      "sourceType": "github",
+      "skillPath": "skills/test-strategy/SKILL.md",
+      "computedHash": "02136ba73e4c2af061792a2e5a135711aede9be3a15f2b777049f6e6af8d51f3"
+    }
+  }
+}
