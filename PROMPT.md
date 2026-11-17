@@ -110,9 +110,9 @@ subagents, e.g.:
 
 - `code` subagent -> `qwen3-8b` (cheap main coder)
 - `architect` subagent -> `deepseek-v4-pro`
-- `debug` subagent -> `deepseek-v4-flash`
-- `review` subagent -> `grok-4-fast-non-reasoning`
-- `orchestrator` (primary) -> `grok-4-fast-non-reasoning`
+- `debug` subagent -> `deepseek-flash`
+- `review` subagent -> `grok-4.3`
+- `orchestrator` (primary) -> `grok-4.3`
 
 This is all OpenCode config, NOT gateway code. The gateway must simply pass the
 requested model through to 1min.ai unchanged.
@@ -196,11 +196,10 @@ The plugin must install the gateway on Windows, macOS, and Linux:
 
 ## Reference pricing (for the sample config)
 
-- grok-4-fast-non-reasoning: input 600, output 1502 (per 1M tokens)
 - deepseek-v4-pro: input 1305, output 2612
 - qwen3-8b: input 0, output 0 (free tier)
 - qwen3.7-flash: input 90, output 390
-- deepseek-v4-flash: input 420, output 840
+- deepseek-flash: input 420, output 840
 - grok-4.3: input 3752, output 7505
 - us.anthropic.claude-sonnet-5: input 6603, output 33017
 

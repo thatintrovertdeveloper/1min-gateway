@@ -54,18 +54,64 @@ export function defaultConfig(port: number): GatewayFileConfig {
   };
 }
 
-export async function readConfig(filePath: string): Promise<GatewayFileConfig | null> {
+export type ConfigReadResult =
+  | { kind: "ok"; config: GatewayFileConfig }
+  | { kind: "missing" }
+  | { kind: "corrupt"; message: string };
+
+/**
+ * Distinguish "no config yet" from an unreadable one: callers must never
+ * overwrite a corrupt config, which would destroy the user's API key.
+ */
+export async function readConfigResult(filePath: string): Promise<ConfigReadResult> {
+  let raw: string;
   try {
-    const raw = await fs.readFile(filePath, "utf-8");
-    return JSON.parse(raw) as GatewayFileConfig;
-  } catch {
-    return null;
+    raw = await fs.readFile(filePath, "utf-8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "missing" };
+    return { kind: "corrupt", message: (error as Error).message };
+  }
+  try {
+    const parsed = JSON.parse(raw) as GatewayFileConfig;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("config root must be a JSON object");
+    }
+    return { kind: "ok", config: parsed };
+  } catch (error) {
+    return { kind: "corrupt", message: (error as Error).message };
   }
 }
 
+/** Back-compat: null only when the config does not exist. */
+export async function readConfig(filePath: string): Promise<GatewayFileConfig | null> {
+  const result = await readConfigResult(filePath);
+  return result.kind === "ok" ? result.config : null;
+}
+
 export async function writeConfig(filePath: string, config: GatewayFileConfig): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(config, null, 2), "utf-8");
+  const dir = path.dirname(filePath);
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  if (process.platform !== "win32") {
+    try {
+      await fs.chmod(dir, 0o700);
+    } catch {
+      // Best effort (e.g. filesystem without POSIX permissions).
+    }
+  }
+  const tmp = `${filePath}.${process.pid}.tmp`;
+  try {
+    await fs.writeFile(tmp, JSON.stringify(config, null, 2), { encoding: "utf-8", mode: 0o600 });
+    await fs.rename(tmp, filePath);
+  } finally {
+    await fs.rm(tmp, { force: true });
+  }
+  if (process.platform !== "win32") {
+    try {
+      await fs.chmod(filePath, 0o600);
+    } catch {
+      // Best effort (e.g. filesystem without POSIX permissions).
+    }
+  }
 }
 
 /**
@@ -74,9 +120,41 @@ export async function writeConfig(filePath: string, config: GatewayFileConfig): 
  * Returns the effective config actually on disk after this call.
  */
 export async function ensureConfig(filePath: string, preferredPort: number): Promise<GatewayFileConfig> {
-  const existing = await readConfig(filePath);
-  if (existing) {
-    return existing;
+  const result = await readConfigResult(filePath);
+  if (result.kind === "corrupt") {
+    const backup = `${filePath}.bad.${Date.now()}`;
+    await fs.rename(filePath, backup);
+    throw new Error(`Unreadable config saved as ${backup}: ${result.message}`);
+  }
+  if (result.kind === "ok") {
+    // Fill in missing fields without touching user values. Keep stale custom
+    // model entries; they are harmless and may still be valid on their relay.
+    const defaults = defaultConfig(preferredPort);
+    const existing = result.config;
+    const pricing: Record<string, ModelPricing> = { ...DEFAULT_PRICING };
+    for (const [model, entry] of Object.entries(existing.pricing ?? {})) {
+      if (
+        entry &&
+        typeof entry === "object" &&
+        Number.isFinite(entry.input) &&
+        Number.isFinite(entry.output)
+      ) {
+        pricing[model] = entry;
+      }
+    }
+    const dp = existing.default_pricing;
+    const defaultPricing =
+      dp && typeof dp === "object" && Number.isFinite(dp.input) && Number.isFinite(dp.output)
+        ? dp
+        : defaults.default_pricing;
+    const merged: GatewayFileConfig = {
+      ...defaults,
+      ...existing,
+      pricing,
+      default_pricing: defaultPricing,
+    };
+    await writeConfig(filePath, merged);
+    return merged;
   }
   const fresh = defaultConfig(preferredPort);
   await writeConfig(filePath, fresh);

@@ -31,10 +31,15 @@ def make_backend_result(text: str) -> BackendResult:
     return BackendResult(text=text)
 
 
-def make_request() -> ChatCompletionRequest:
+def make_request(acknowledge: str | None = None) -> ChatCompletionRequest:
+    messages = [ChatMessage(role="user", content="do the thing")]
+    if acknowledge:
+        messages.append(
+            ChatMessage(role="tool", content="ok", tool_call_id=acknowledge)
+        )
     return ChatCompletionRequest(
         model="grok-4.3",
-        messages=[ChatMessage(role="user", content="do the thing")],
+        messages=messages,
         tools=[],
     )
 
@@ -51,16 +56,25 @@ class TestRunOneRoundQueuesExtraToolCalls:
         assert r1.choices[0].message.tool_calls[0].function.name == "a"
         assert r1.choices[0].finish_reason == "tool_calls"
 
-        r2, _ = await app_module._run_one_round(make_request(), "session-1")
+        first_id = r1.choices[0].message.tool_calls[0].id
+        r2, _ = await app_module._run_one_round(
+            make_request(acknowledge=first_id), "session-1"
+        )
         assert backend.await_count == 1  # backend NOT called again
         assert r2.choices[0].message.tool_calls[0].function.name == "b"
 
-        r3, _ = await app_module._run_one_round(make_request(), "session-1")
+        second_id = r2.choices[0].message.tool_calls[0].id
+        r3, _ = await app_module._run_one_round(
+            make_request(acknowledge=second_id), "session-1"
+        )
         assert backend.await_count == 1
         assert r3.choices[0].message.tool_calls[0].function.name == "c"
 
         backend.return_value = make_backend_result("all done")
-        r4, _ = await app_module._run_one_round(make_request(), "session-1")
+        third_id = r3.choices[0].message.tool_calls[0].id
+        r4, _ = await app_module._run_one_round(
+            make_request(acknowledge=third_id), "session-1"
+        )
         assert backend.await_count == 2  # queue empty -- backend called again
         assert r4.choices[0].finish_reason == "stop"
 
@@ -82,7 +96,10 @@ class TestRunOneRoundQueuesExtraToolCalls:
         assert r2.choices[0].message.tool_calls[0].function.name == "x"
 
         # session-1's queued "b" is still there, unaffected by session-2.
-        r3, _ = await app_module._run_one_round(make_request(), "session-1")
+        first_id = app_module.tool_call_queue._queues["session-1"][0].previous_call_id
+        r3, _ = await app_module._run_one_round(
+            make_request(acknowledge=first_id), "session-1"
+        )
         assert r3.choices[0].message.tool_calls[0].function.name == "b"
 
     async def test_dispensed_queued_call_records_zero_usage_and_no_backend_call(
@@ -91,10 +108,13 @@ class TestRunOneRoundQueuesExtraToolCalls:
         backend = AsyncMock(return_value=make_backend_result(multi_call_text("a", "b")))
         monkeypatch.setattr(app_module, "call_backend", backend)
 
-        await app_module._run_one_round(make_request(), "session-1")
+        r1, _ = await app_module._run_one_round(make_request(), "session-1")
         before = app_module.usage_tracker.session_snapshot("session-1")
 
-        r2, _ = await app_module._run_one_round(make_request(), "session-1")
+        first_id = r1.choices[0].message.tool_calls[0].id
+        r2, _ = await app_module._run_one_round(
+            make_request(acknowledge=first_id), "session-1"
+        )
         after = app_module.usage_tracker.session_snapshot("session-1")
 
         assert r2.usage.total_tokens == 0

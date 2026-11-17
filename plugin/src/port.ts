@@ -1,7 +1,7 @@
 /**
- * Port selection: try the default (8765), fall back to the next free port.
- * The chosen port is persisted into config.json by the caller so restarts
- * reuse the same one instead of drifting.
+ * Port selection: try the configured port (default 8765), fall back to the
+ * next free port. The chosen port is persisted into config.json by the caller
+ * so restarts reuse the same one instead of drifting.
  */
 
 import net from "node:net";
@@ -25,10 +25,14 @@ export async function findFreePort(preferred = 8765, host = "127.0.0.1"): Promis
   throw new Error(`No free port found starting from ${preferred}`);
 }
 
-export async function isGatewayHealthy(baseUrl: string): Promise<boolean> {
+export async function isGatewayHealthy(host: string, port: number): Promise<boolean> {
   try {
-    const res = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(1500) });
-    return res.ok;
+    const res = await fetch(`http://${host}:${port}/health`, {
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!res.ok) return false;
+    const body = (await res.json()) as { status?: string };
+    return body.status === "ok";
   } catch {
     return false;
   }

@@ -17,12 +17,20 @@ function unitPath(): string {
   return path.join(unitDir(), SYSTEMD_UNIT);
 }
 
-function unitContents(pythonExe: string): string {
+/** systemd splits unquoted ExecStart values on spaces. */
+function systemdPath(value: string): string {
+  if (/[\r\n\0]/.test(value)) throw new Error("Invalid control character in service path");
+  // Inside double quotes systemd only treats \" and \\ specially.
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function unitContents(pythonExe: string, args: string[]): string {
+  const command = [`"${systemdPath(pythonExe)}"`, ...args.map((arg) => `"${systemdPath(arg)}"`)].join(" ");
   return `[Unit]
 Description=1min.ai Agent Gateway
 
 [Service]
-ExecStart=${pythonExe} -m onemin_gateway
+ExecStart=${command}
 Restart=on-failure
 
 [Install]
@@ -30,13 +38,19 @@ WantedBy=default.target
 `;
 }
 
-export async function registerLinuxService($: Shell, pythonExe: string): Promise<void> {
+export async function registerLinuxService(
+  $: Shell,
+  pythonExe: string,
+  args: string[],
+): Promise<void> {
   const target = unitPath();
   await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.writeFile(target, unitContents(pythonExe), "utf-8");
+  await fs.writeFile(target, unitContents(pythonExe, args), "utf-8");
 
-  await $`systemctl --user daemon-reload`.quiet().nothrow();
-  await $`systemctl --user enable --now ${SYSTEMD_UNIT}`.quiet().nothrow();
+  const reload = await $`systemctl --user daemon-reload`.quiet().nothrow();
+  if (reload.exitCode !== 0) throw new Error(`systemctl daemon-reload failed (${reload.exitCode})`);
+  const enable = await $`systemctl --user enable --now ${SYSTEMD_UNIT}`.quiet().nothrow();
+  if (enable.exitCode !== 0) throw new Error(`systemctl enable failed (${enable.exitCode})`);
 }
 
 export async function isLinuxServiceRegistered(): Promise<boolean> {
@@ -58,5 +72,6 @@ export async function unregisterLinuxService($: Shell): Promise<void> {
  * change (see restartWindowsService for why).
  */
 export async function restartLinuxService($: Shell): Promise<void> {
-  await $`systemctl --user restart ${SYSTEMD_UNIT}`.quiet().nothrow();
+  const result = await $`systemctl --user restart ${SYSTEMD_UNIT}`.quiet().nothrow();
+  if (result.exitCode !== 0) throw new Error(`systemctl restart failed (${result.exitCode})`);
 }

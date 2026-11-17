@@ -15,7 +15,7 @@
 import type { Hooks, Plugin, PluginInput } from "@opencode-ai/plugin";
 
 import { configFilePath } from "./config-paths.js";
-import { readConfig } from "./gateway-config.js";
+import { DEFAULT_PRICING, readConfig } from "./gateway-config.js";
 import { installGateway } from "./install.js";
 
 const PROVIDER_ID = "1min-gateway";
@@ -27,15 +27,18 @@ function log(message: string): void {
 
 export const OneMinGatewayPlugin: Plugin = async (input: PluginInput) => {
   let installedPort: number | null = null;
+  let installedHost: string | null = null;
 
   try {
     const result = await installGateway(input.$, log);
     installedPort = result.port;
+    installedHost = new URL(result.baseUrl).hostname;
   } catch (error) {
     // Never throw out of plugin activation -- OpenCode would fail to start.
     // Log and let the `config` hook fall back to whatever is on disk (or
     // the default port), so the user can fix the install and retry.
     log(`install failed: ${(error as Error).message}`);
+    return {};
   }
 
   const hooks: Hooks = {
@@ -47,9 +50,15 @@ export const OneMinGatewayPlugin: Plugin = async (input: PluginInput) => {
     // still there for the command's underlying script to call.
     config: async (config) => {
       const fileConfig = await readConfig(configFilePath());
-      const port = installedPort ?? fileConfig?.port ?? 8765;
-      const baseUrl = `http://127.0.0.1:${port}/v1`;
-      const pricing = fileConfig?.pricing ?? {};
+      if (!installedPort && !fileConfig) return;
+      const port = installedPort ?? fileConfig!.port ?? 8765;
+      const host = installedHost ?? fileConfig!.host ?? "127.0.0.1";
+      // A gateway bound to all interfaces is still reached locally.
+      const clientHost = host === "0.0.0.0" ? "127.0.0.1" : host;
+      const baseUrl = `http://${clientHost}:${port}/v1`;
+      // An old/hand-written config may have no pricing. Fall back to the
+      // built-in defaults instead of registering zero models.
+      const pricing = { ...DEFAULT_PRICING, ...(fileConfig?.pricing ?? {}) };
 
       config.provider = config.provider ?? {};
       config.provider[PROVIDER_ID] = {

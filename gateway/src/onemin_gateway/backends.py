@@ -15,11 +15,31 @@ Backend call signature: `call(prompt, model) -> BackendResult`.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
 from .config import GatewayConfig
+
+logger = logging.getLogger("onemin_gateway")
+
+
+def _response_excerpt(resp: httpx.Response) -> str:
+    """Log only the status: bodies can carry keys or prompt data."""
+    return f"HTTP {resp.status_code}"
+
+
+def _json_object(resp: httpx.Response, backend: str) -> dict[str, Any]:
+    """Parse and validate a backend JSON response shape."""
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise BackendError(f"{backend} returned invalid JSON") from exc
+    if not isinstance(data, dict):
+        raise BackendError(f"{backend} returned an unexpected JSON value")
+    return data
 
 
 class BackendError(Exception):
@@ -84,22 +104,35 @@ async def call_oneminai(prompt: str, model: str, config: GatewayConfig) -> Backe
         try:
             resp = await client.post(url, headers=headers, json=body)
         except httpx.HTTPError as exc:
-            raise BackendError(f"Network error calling 1min.ai: {exc}") from exc
+            # httpx exception strings can contain the full request URL,
+            # including credentials embedded in a custom backend base URL.
+            logger.warning("Network error calling 1min.ai: %s", exc)
+            raise BackendError("Network error calling 1min.ai") from exc
 
     if resp.status_code >= 400:
-        raise BackendError(
-            f"1min.ai returned {resp.status_code}: {resp.text[:500]}"
-        )
+        logger.warning("1min.ai error %s: %s", resp.status_code, _response_excerpt(resp))
+        raise BackendError(f"1min.ai returned HTTP {resp.status_code}")
 
-    data = resp.json()
+    data = _json_object(resp, "1min.ai")
     ai_record = data.get("aiRecord") or {}
+    if not isinstance(ai_record, dict):
+        raise BackendError("1min.ai returned an unexpected response shape")
     detail = ai_record.get("aiRecordDetail") or {}
+    if not isinstance(detail, dict):
+        raise BackendError("1min.ai returned an unexpected response shape")
     result_object = detail.get("resultObject") or []
-    text = (result_object[0] if result_object else None) or data.get("content") or ""
+    if not isinstance(result_object, (list, tuple)):
+        raise BackendError("1min.ai returned an unexpected resultObject")
+    raw_text = result_object[0] if result_object else data.get("content")
+    if raw_text is not None and not isinstance(raw_text, str):
+        raise BackendError("1min.ai returned a non-text model response")
+    text = raw_text or ""
 
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     metadata = ai_record.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        raise BackendError("1min.ai returned an unexpected metadata shape")
     input_tok = metadata.get("inputToken")
     output_tok = metadata.get("outputToken")
     if isinstance(input_tok, (int, float)) or isinstance(output_tok, (int, float)):
@@ -141,17 +174,27 @@ async def call_relay(prompt: str, model: str, config: GatewayConfig) -> BackendR
         try:
             resp = await client.post(url, headers=headers, json=body)
         except httpx.HTTPError as exc:
-            raise BackendError(f"Network error calling relay: {exc}") from exc
+            logger.warning("Network error calling relay: %s", exc)
+            raise BackendError("Network error calling relay") from exc
 
     if resp.status_code >= 400:
-        raise BackendError(f"Relay returned {resp.status_code}: {resp.text[:500]}")
+        logger.warning("Relay error %s: %s", resp.status_code, _response_excerpt(resp))
+        raise BackendError(f"Relay returned HTTP {resp.status_code}")
 
-    data = resp.json()
+    data = _json_object(resp, "Relay")
     choices = data.get("choices") or []
+    if not isinstance(choices, (list, tuple)):
+        raise BackendError("Relay returned an unexpected choices field")
     text = ""
     if choices:
-        message = choices[0].get("message") or {}
-        text = message.get("content") or ""
+        first = choices[0]
+        message = first.get("message") or {} if isinstance(first, dict) else {}
+        if not isinstance(message, dict):
+            raise BackendError("Relay returned an unexpected message shape")
+        raw_text = message.get("content")
+        if raw_text is not None and not isinstance(raw_text, str):
+            raise BackendError("Relay returned a non-text model response")
+        text = raw_text or ""
 
     prompt_tokens: int | None = None
     completion_tokens: int | None = None

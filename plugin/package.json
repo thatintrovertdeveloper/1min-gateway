@@ -7,11 +7,16 @@
   "types": "dist/index.d.ts",
   "files": [
     "dist",
-    "../gateway"
+    "src",
+    "gateway",
+    "scripts",
+    "tsconfig.json"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "watch": "tsc -p tsconfig.json --watch"
+    "watch": "tsc -p tsconfig.json --watch",
+    "prepack": "npm run build && node scripts/vendor-gateway.mjs",
+    "postpack": "node scripts/vendor-gateway.mjs --clean"
   },
   "dependencies": {
     "@opencode-ai/plugin": "^1.18.31"

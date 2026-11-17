@@ -205,6 +205,9 @@ def flatten_messages(messages: list[ChatMessage]) -> str:
             lines.append(f"Human: {text}")
 
         elif role == "assistant":
+            # OpenAI permits both content and tool_calls in one message.
+            if text:
+                lines.append(f"Assistant: {text}")
             if msg.tool_calls:
                 for call in msg.tool_calls:
                     call_id_to_name[call.id] = call.function.name
@@ -216,8 +219,6 @@ def flatten_messages(messages: list[ChatMessage]) -> str:
                         "tool_call": {"name": call.function.name, "arguments": args}
                     }
                     lines.append(f"Assistant: {json.dumps(tool_call_obj)}")
-            elif text:
-                lines.append(f"Assistant: {text}")
 
         elif role == "tool":
             name = call_id_to_name.get(msg.tool_call_id or "", "unknown_tool")
@@ -363,41 +364,53 @@ def parse_tool_calls(
         idx = stripped.find('"tool_call"', cursor)
         if idx == -1:
             break
-        brace_start = stripped.rfind("{", cursor, idx)
-        if brace_start == -1:
-            cursor = idx + len('"tool_call"')
-            continue
-        balanced = _find_balanced_json(stripped, brace_start)
+        # Try every enclosing opening brace, innermost first. The key may
+        # sit directly inside a tool_call object, inside a wrapper object, or
+        # after an unrelated `{...}` value on the same line; only a parsed
+        # object that actually has a `tool_call` field is a match.
+        candidates = [
+            pos
+            for pos, ch in enumerate(stripped[cursor:idx], start=cursor)
+            if ch == "{"
+        ]
+        balanced = None
+        brace_start = -1
+        for candidate in reversed(candidates):
+            maybe = _find_balanced_json(stripped, candidate)
+            if maybe is None:
+                continue
+            try:
+                obj = json.loads(maybe)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict) and isinstance(obj.get("tool_call"), dict):
+                brace_start, balanced = candidate, maybe
+                break
         if balanced is None:
             cursor = idx + len('"tool_call"')
             continue
         end = brace_start + len(balanced)
-        try:
-            obj = json.loads(balanced)
-        except json.JSONDecodeError:
+        obj = json.loads(balanced)
+        call = obj["tool_call"]
+        name = call.get("name")
+        arguments = call.get("arguments", {})
+        if isinstance(name, str):
+            if not isinstance(arguments, dict):
+                arguments = {}
+            else:
+                arguments = {
+                    key: (
+                        _repair_double_escaped_whitespace(val)
+                        if key in _REPAIRABLE_ARG_NAMES and isinstance(val, str)
+                        else val
+                    )
+                    for key, val in arguments.items()
+                }
+            matches.append(
+                (brace_start, end, ParsedToolCall(name=name, arguments=arguments))
+            )
             cursor = end
             continue
-        if isinstance(obj, dict) and isinstance(obj.get("tool_call"), dict):
-            call = obj["tool_call"]
-            name = call.get("name")
-            arguments = call.get("arguments", {})
-            if isinstance(name, str):
-                if not isinstance(arguments, dict):
-                    arguments = {}
-                else:
-                    arguments = {
-                        key: (
-                            _repair_double_escaped_whitespace(val)
-                            if key in _REPAIRABLE_ARG_NAMES and isinstance(val, str)
-                            else val
-                        )
-                        for key, val in arguments.items()
-                    }
-                matches.append(
-                    (brace_start, end, ParsedToolCall(name=name, arguments=arguments))
-                )
-                cursor = end
-                continue
         # tool_call-shaped but invalid (e.g. missing name) -- skip it and
         # keep scanning for a later, valid block.
         cursor = end

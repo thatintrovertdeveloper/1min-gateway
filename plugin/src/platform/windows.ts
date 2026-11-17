@@ -10,17 +10,21 @@ import { Shell, SERVICE_NAME } from "./common.js";
 export async function registerWindowsService(
   $: Shell,
   pythonExe: string,
+  args: string[],
 ): Promise<void> {
   // /TR takes a single command-line string. Because the python path itself
   // may contain spaces (e.g. under "Program Files"), it needs its own
   // inner quotes, and the whole thing needs outer quotes as the /TR value.
   // `{ raw: ... }` bypasses Bun's automatic escaping so these literal
   // quotes reach schtasks unmangled.
-  const trArg = `"\\"${pythonExe}\\" -m onemin_gateway"`;
-  await $`schtasks /Create /TN ${SERVICE_NAME} /TR ${{ raw: trArg }} /SC ONLOGON /RL LIMITED /F`
+  const command = [`"${pythonExe}"`, ...args.map((arg) => `"${arg}"`)].join(" ");
+  const trArg = `"${command.replace(/"/g, '\\"')}"`;
+  const create = await $`schtasks /Create /TN ${SERVICE_NAME} /TR ${{ raw: trArg }} /SC ONLOGON /RL LIMITED /F`
     .quiet()
     .nothrow();
-  await $`schtasks /Run /TN ${SERVICE_NAME}`.quiet().nothrow();
+  if (create.exitCode !== 0) throw new Error(`schtasks /Create failed (${create.exitCode})`);
+  const run = await $`schtasks /Run /TN ${SERVICE_NAME}`.quiet().nothrow();
+  if (run.exitCode !== 0) throw new Error(`schtasks /Run failed (${run.exitCode})`);
 }
 
 export async function isWindowsServiceRegistered($: Shell): Promise<boolean> {
@@ -43,5 +47,6 @@ export async function unregisterWindowsService($: Shell): Promise<void> {
  */
 export async function restartWindowsService($: Shell): Promise<void> {
   await $`schtasks /End /TN ${SERVICE_NAME}`.quiet().nothrow();
-  await $`schtasks /Run /TN ${SERVICE_NAME}`.quiet().nothrow();
+  const run = await $`schtasks /Run /TN ${SERVICE_NAME}`.quiet().nothrow();
+  if (run.exitCode !== 0) throw new Error(`schtasks /Run failed (${run.exitCode})`);
 }

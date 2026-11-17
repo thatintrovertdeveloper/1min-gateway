@@ -17,12 +17,13 @@
  * skipped.
  */
 
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { configFilePath, venvDir, venvPython } from "./config-paths.js";
 import type { GatewayFileConfig } from "./gateway-config.js";
-import { defaultConfig, readConfig, writeConfig } from "./gateway-config.js";
+import { ensureConfig, readConfigResult } from "./gateway-config.js";
 import { registerLinuxService, restartLinuxService } from "./platform/linux.js";
 import { registerMacService, restartMacService } from "./platform/macos.js";
 import { registerWindowsService, restartWindowsService } from "./platform/windows.js";
@@ -53,8 +54,11 @@ export type Logger = (message: string) => void;
 export function gatewaySourceDir(): string {
   if (process.env.ONE_MIN_GATEWAY_SRC) return process.env.ONE_MIN_GATEWAY_SRC;
   const here = path.dirname(fileURLToPath(import.meta.url));
-  // dist/install.js -> ../../gateway (plugin/dist -> plugin -> repo root -> gateway)
-  return path.join(here, "..", "..", "gateway");
+  // Local dev: dist/install.js -> ../../gateway (repo root/gateway).
+  // Published package: dist/install.js -> ../gateway (vendored in the tarball).
+  const sibling = path.join(here, "..", "gateway");
+  const bundled = path.join(here, "..", "..", "gateway");
+  return existsSync(sibling) ? sibling : bundled;
 }
 
 async function commandWorks($: Shell, cmd: string, ...args: string[]): Promise<boolean> {
@@ -73,7 +77,10 @@ async function bootstrapPython($: Shell, log: Logger): Promise<string> {
 
   if (await commandWorks($, "uv", "--version")) {
     log("1min-gateway: bootstrapping Python via uv...");
-    await $`uv venv ${vDir} --python 3.11`.quiet().nothrow();
+    const venv = await $`uv venv ${vDir} --python 3.11`.quiet().nothrow();
+    if (venv.exitCode !== 0) {
+      throw new Error(`Could not create gateway venv at ${vDir} (exit ${venv.exitCode})`);
+    }
     await $`uv pip install --python ${vPython} -e ${src}`.quiet();
     return vPython;
   }
@@ -90,21 +97,33 @@ async function bootstrapPython($: Shell, log: Logger): Promise<string> {
   }
 
   log(`1min-gateway: uv not found; falling back to ${systemPython} + venv...`);
-  await $`${systemPython} -m venv ${vDir}`.quiet();
-  await $`${vPython} -m pip install --upgrade pip`.quiet().nothrow();
+  const venv = await $`${systemPython} -m venv ${vDir}`.quiet().nothrow();
+  if (venv.exitCode !== 0) {
+    throw new Error(`Could not create gateway venv at ${vDir} (exit ${venv.exitCode})`);
+  }
   await $`${vPython} -m pip install -e ${src}`.quiet();
   return vPython;
 }
 
-async function registerService($: Shell, pythonExe: string, log: Logger): Promise<void> {
+async function registerService(
+  $: Shell,
+  pythonExe: string,
+  gatewayArgs: string[],
+  log: Logger,
+): Promise<void> {
   log(`1min-gateway: registering background service for ${process.platform}...`);
   if (process.platform === "win32") {
-    await registerWindowsService($, pythonExe);
+    await registerWindowsService($, pythonExe, gatewayArgs);
   } else if (process.platform === "darwin") {
-    await registerMacService($, pythonExe);
+    await registerMacService($, pythonExe, gatewayArgs);
   } else {
-    await registerLinuxService($, pythonExe);
+    await registerLinuxService($, pythonExe, gatewayArgs);
   }
+}
+
+/** Service commands must use the exact port persisted in config.json. */
+function gatewayArgs(config: GatewayFileConfig): string[] {
+  return ["-m", "onemin_gateway", "--port", String(config.port)];
 }
 
 function baseUrlFor(host: string, port: number): string {
@@ -113,24 +132,26 @@ function baseUrlFor(host: string, port: number): string {
 
 export async function installGateway($: Shell, log: Logger = () => {}): Promise<InstallResult> {
   const cfgPath = configFilePath();
-  const existing = await readConfig(cfgPath);
+  const read = await readConfigResult(cfgPath);
+  if (read.kind === "corrupt") {
+    throw new Error(`Refusing to overwrite unreadable config: ${read.message}`);
+  }
+  const existing = read.kind === "ok" ? read.config : null;
+  const configuredHost = existing?.host ?? "127.0.0.1";
+  // 0.0.0.0 is a bind address; clients must reach the loopback interface.
+  const host = configuredHost === "0.0.0.0" ? "127.0.0.1" : configuredHost;
 
-  if (existing && (await isGatewayHealthy(`http://${existing.host}:${existing.port}`))) {
+  if (existing && (await isGatewayHealthy(host, existing.port))) {
     log(`1min-gateway: already running on port ${existing.port}.`);
     return {
       port: existing.port,
-      baseUrl: baseUrlFor(existing.host, existing.port),
+      baseUrl: baseUrlFor(host, existing.port),
       alreadyRunning: true,
     };
   }
 
-  const preferredPort = existing?.port ?? 8765;
-  const port = await findFreePort(preferredPort);
-
-  const config: GatewayFileConfig = existing
-    ? { ...existing, port }
-    : defaultConfig(port);
-  await writeConfig(cfgPath, config);
+  const port = await findFreePort(existing?.port ?? 8765, host);
+  const config = await ensureConfig(cfgPath, port);
 
   if (!config.oneminai_api_key && config.backend === "oneminai") {
     log(
@@ -140,22 +161,21 @@ export async function installGateway($: Shell, log: Logger = () => {}): Promise<
   }
 
   const pythonExe = await bootstrapPython($, log);
-  await registerService($, pythonExe, log);
+  await registerService($, pythonExe, gatewayArgs(config), log);
 
-  const baseUrl = baseUrlFor(config.host, config.port);
+  const baseUrl = baseUrlFor(host, config.port);
   for (let attempt = 0; attempt < 10; attempt++) {
-    if (await isGatewayHealthy(`http://${config.host}:${config.port}`)) {
+    if (await isGatewayHealthy(host, config.port)) {
       log(`1min-gateway: healthy at ${baseUrl}`);
       return { port: config.port, baseUrl, alreadyRunning: false };
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
 
-  log(
-    `1min-gateway: service registered but did not respond within 10s. ` +
-      "Check the service logs; it may still be starting.",
+  throw new Error(
+    `Service registered but ${baseUrl}/health did not respond within 10s. ` +
+      "Check the service logs.",
   );
-  return { port: config.port, baseUrl, alreadyRunning: false };
 }
 
 /**
@@ -171,8 +191,13 @@ export async function installGateway($: Shell, log: Logger = () => {}): Promise<
  */
 export async function restartGateway($: Shell, log: Logger = () => {}): Promise<RestartResult> {
   const cfgPath = configFilePath();
-  const config = await readConfig(cfgPath);
-  const host = config?.host ?? "127.0.0.1";
+  const read = await readConfigResult(cfgPath);
+  if (read.kind === "corrupt") {
+    throw new Error(`Refusing to restart with unreadable config: ${read.message}`);
+  }
+  const config = read.kind === "ok" ? read.config : null;
+  const configuredHost = config?.host ?? "127.0.0.1";
+  const host = configuredHost === "0.0.0.0" ? "127.0.0.1" : configuredHost;
   const port = config?.port ?? 8765;
   const baseUrl = baseUrlFor(host, port);
 
@@ -187,7 +212,7 @@ export async function restartGateway($: Shell, log: Logger = () => {}): Promise<
 
   for (let attempt = 0; attempt < 10; attempt++) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
-    if (await isGatewayHealthy(`http://${host}:${port}`)) {
+    if (await isGatewayHealthy(host, port)) {
       const message = `1min-gateway: restarted and healthy at ${baseUrl}`;
       log(message);
       return { healthy: true, baseUrl, message };

@@ -85,8 +85,8 @@ isn't responding.
 
 The plugin doesn't have your key, so the first run writes a config with an
 empty one. Open the config file it logged and fill in `oneminai_api_key`,
-then restart the gateway service (or just restart OpenCode, which restarts
-it):
+then restart the gateway service (see below; restarting OpenCode alone does
+not restart the gateway):
 
 ```json
 {
@@ -104,6 +104,12 @@ To use your own relay instead of 1min.ai directly, set:
 }
 ```
 
+Secrets can also be supplied via the `ONEMIN_GATEWAY_API_KEY` and
+`ONEMIN_GATEWAY_RELAY_API_KEY` environment variables (they override the
+values in config.json for that process). The config directory is created
+with `0700` permissions and config.json with `0600` on POSIX; an unreadable
+config is saved as `config.json.bad.<timestamp>` instead of being overwritten.
+
 A filled-in reference is at [`gateway/config.sample.json`](gateway/config.sample.json).
 
 ### 3. Configure pricing (optional)
@@ -112,15 +118,16 @@ The `pricing` block in config.json drives cost tracking (`GET /v1/usage`
 and OpenCode's own cost display, via the `cost` field the plugin writes into
 each model's provider config). Units are whatever you use consistently —
 1min.ai credits, USD, etc. — the gateway just multiplies
-`tokens / 1,000,000 * price`. Reference values (as configured by default):
+`tokens / 1,000,000 * price`. These defaults are also merged into existing
+configs on load/install, so an older config without a `pricing` block still
+registers the models below. Reference values:
 
 | Model | Input (per 1M) | Output (per 1M) |
 |---|---|---|
-| `grok-4-fast-non-reasoning` | 600 | 1502 |
 | `deepseek-v4-pro` | 1305 | 2612 |
 | `qwen3-8b` | 0 | 0 |
 | `qwen3.7-flash` | 90 | 390 |
-| `deepseek-v4-flash` | 420 | 840 |
+| `deepseek-flash` | 420 | 840 |
 | `grok-4.3` | 3752 | 7505 |
 | `us.anthropic.claude-sonnet-5` | 6603 | 33017 |
 
@@ -140,7 +147,7 @@ Configure your tiered strategy as **named subagents** in `opencode.json`:
   "agent": {
     "orchestrator": {
       "mode": "primary",
-      "model": "1min-gateway/grok-4-fast-non-reasoning"
+      "model": "1min-gateway/grok-4.3"
     },
     "code": {
       "mode": "subagent",
@@ -152,11 +159,11 @@ Configure your tiered strategy as **named subagents** in `opencode.json`:
     },
     "debug": {
       "mode": "subagent",
-      "model": "1min-gateway/deepseek-v4-flash"
+      "model": "1min-gateway/deepseek-flash"
     },
     "review": {
       "mode": "subagent",
-      "model": "1min-gateway/grok-4-fast-non-reasoning"
+      "model": "1min-gateway/grok-4.3"
     }
   }
 }

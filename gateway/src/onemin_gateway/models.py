@@ -11,6 +11,8 @@ import time
 import uuid
 from typing import Any, Literal
 
+from pydantic import field_validator
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -55,6 +57,13 @@ class ChatCompletionRequest(BaseModel):
     tool_choice: Any = None
     stream: bool = False
     session_id: str | None = None  # not part of OpenAI spec; used if present
+
+    @field_validator("messages")
+    @classmethod
+    def _non_empty_messages(cls, messages: list[ChatMessage]) -> list[ChatMessage]:
+        if not messages:
+            raise ValueError("messages must not be empty")
+        return messages
 
 
 class Usage(BaseModel):
